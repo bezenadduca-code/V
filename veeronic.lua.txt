@@ -1,0 +1,568 @@
+-- Load WindUI
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
+local ContextActionService = game:GetService("ContextActionService")
+local UserInputService  = game:GetService("UserInputService")
+local Players           = game:GetService("Players")
+
+local lp     = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- =====================
+-- Feature Flags  (ALL declared first so every closure can reference them)
+-- =====================
+local noWallStop           = false
+local autoTrick            = false
+local fastSpray            = false
+local controlChargeEnabled = false
+
+-- =====================
+-- Shared Sk8 State
+-- =====================
+local trickCallback = nil
+local trickDebounce = false
+
+-- =====================
+-- Highlight Cache  (declared early — CharacterAdded closure needs it)
+-- =====================
+local trackedHighlight = nil
+
+-- =====================
+-- Fast Spray State
+-- =====================
+local SPRAY_ANIM_ID   = "96618767275101"   -- CanSpray animation from Veeronica config
+local fastSprayPhase  = 0
+local fastSprayBaseCF = nil
+
+-- =====================
+-- Charge Override State
+-- =====================
+local chargeAnimIds       = { "117058860640843" }
+local ORIGINAL_DASH_SPEED = 60
+local controlChargeActive = false
+local overrideConnection  = nil
+local savedHumanoidState  = {}
+local shiftlockEnabled    = false
+local shiftlockConnection = nil
+
+-- =====================
+-- No-Wall-Stop: wall raycast params
+-- Built once; excludes all players so the ray only hits geometry.
+-- =====================
+local wallRayParams = RaycastParams.new()
+wallRayParams.FilterType         = Enum.RaycastFilterType.Exclude
+wallRayParams.RespectCanCollide  = true
+pcall(function()
+    wallRayParams.FilterDescendantsInstances = { workspace.Players }
+end)
+
+-- =====================
+-- Fast Spray helper
+-- Checks whether the CanSpray animation is currently playing.
+-- =====================
+local function isCurrentlySprayPainting()
+    local char = lp.Character
+    if not char then return false end
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    if not hum  then return false end
+    for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+        local ok, id = pcall(function()
+            return tostring(track.Animation and track.Animation.AnimationId or ""):match("%d+")
+        end)
+        if ok and id == SPRAY_ANIM_ID then return true end
+    end
+    return false
+end
+
+-- =====================
+-- Shiftlock
+-- =====================
+local function setShiftlock(state)
+    shiftlockEnabled = state
+    if shiftlockConnection then
+        shiftlockConnection:Disconnect()
+        shiftlockConnection = nil
+    end
+    if shiftlockEnabled then
+        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        shiftlockConnection = RunService.RenderStepped:Connect(function()
+            local character = lp.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local camCF = camera.CFrame
+                root.CFrame = CFrame.new(root.Position, Vector3.new(
+                    camCF.LookVector.X + root.Position.X,
+                    root.Position.Y,
+                    camCF.LookVector.Z + root.Position.Z
+                ))
+            end
+        end)
+    else
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+    end
+end
+
+-- =====================
+-- Charge Override logic
+-- =====================
+local function getHumanoid()
+    if not lp or not lp.Character then return nil end
+    return lp.Character:FindFirstChildOfClass("Humanoid")
+end
+
+local function saveHumState(hum)
+    if not hum or savedHumanoidState[hum] then return end
+    local s = {}
+    pcall(function()
+        s.WalkSpeed    = hum.WalkSpeed
+        local ok = pcall(function() s.JumpPower = hum.JumpPower end)
+        if not ok then pcall(function() s.JumpPower = hum.JumpHeight end) end
+        local ok2, ar = pcall(function() return hum.AutoRotate end)
+        if ok2 then s.AutoRotate = ar end
+        s.PlatformStand = hum.PlatformStand
+    end)
+    savedHumanoidState[hum] = s
+end
+
+local function restoreHumState(hum)
+    if not hum then return end
+    local s = savedHumanoidState[hum]
+    if not s then return end
+    pcall(function()
+        if s.WalkSpeed    ~= nil then hum.WalkSpeed = s.WalkSpeed end
+        if s.JumpPower    ~= nil then
+            local ok = pcall(function() hum.JumpPower = s.JumpPower end)
+            if not ok then pcall(function() hum.JumpHeight = s.JumpPower end) end
+        end
+        if s.AutoRotate   ~= nil then pcall(function() hum.AutoRotate    = s.AutoRotate    end) end
+        if s.PlatformStand ~= nil then hum.PlatformStand = s.PlatformStand end
+    end)
+    savedHumanoidState[hum] = nil
+end
+
+local function startOverride()
+    if controlChargeActive then return end
+    local hum = getHumanoid()
+    if not hum then return end
+    controlChargeActive = true
+    saveHumState(hum)
+    pcall(function()
+        hum.WalkSpeed  = ORIGINAL_DASH_SPEED
+        hum.AutoRotate = false
+    end)
+    setShiftlock(true)
+    overrideConnection = RunService.RenderStepped:Connect(function()
+        local humanoid = getHumanoid()
+        local rootPart = humanoid and humanoid.Parent and humanoid.Parent:FindFirstChild("HumanoidRootPart")
+        if not humanoid or not rootPart then return end
+        pcall(function()
+            humanoid.WalkSpeed  = ORIGINAL_DASH_SPEED
+            humanoid.AutoRotate = false
+        end)
+        local direction  = rootPart.CFrame.LookVector
+        local horizontal = Vector3.new(direction.X, 0, direction.Z)
+        if horizontal.Magnitude > 0 then
+            humanoid:Move(horizontal.Unit)
+        else
+            humanoid:Move(Vector3.new(0, 0, 0))
+        end
+    end)
+end
+
+local function stopOverride()
+    if not controlChargeActive then return end
+    controlChargeActive = false
+    if overrideConnection then
+        pcall(function() overrideConnection:Disconnect() end)
+        overrideConnection = nil
+    end
+    setShiftlock(false)
+    local hum = getHumanoid()
+    if hum then
+        pcall(function()
+            restoreHumState(hum)
+            hum:Move(Vector3.new(0, 0, 0))
+        end)
+    end
+end
+
+local function detectChargeAnimation()
+    local hum = getHumanoid()
+    if not hum then return false end
+    for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+        local ok, animId = pcall(function()
+            return tostring(track.Animation and track.Animation.AnimationId or ""):match("%d+")
+        end)
+        if ok and animId and animId ~= "" then
+            if table.find(chargeAnimIds, animId) then return true end
+        end
+    end
+    return false
+end
+
+-- =====================
+-- No-Wall-Stop helpers
+-- =====================
+
+-- Returns true if `fn` is the Sk8 stop function (has both RunService and TweenService upvalues).
+local function isSkateStopFn(fn)
+    local ok, ups = pcall(debug.getupvalues, fn)
+    if not ok then return false end
+    local hasRS, hasTS = false, false
+    for _, v in pairs(ups) do
+        if v == RunService   then hasRS = true end
+        if v == TweenService then hasTS = true end
+        if hasRS and hasTS   then return true  end
+    end
+    return false
+end
+
+-- Finds u187 (the stop function) in the Sk8 RenderStep callback's upvalues and replaces it
+-- with a wrapper that silently ignores BasePart reasons (wall collisions).
+local function patchSk8Callback(callback)
+    local ok, ups = pcall(debug.getupvalues, callback)
+    if not ok then return end
+    for i, fn in pairs(ups) do
+        if type(fn) == "function" and isSkateStopFn(fn) then
+            local originalStop = fn
+            debug.setupvalue(callback, i, function(reason)
+                if not noWallStop then
+                    originalStop(reason)
+                    return
+                end
+                -- Allow: string = "Manual" stop, nil = stamina ended, Humanoid = killer hit
+                if type(reason) == "string"
+                    or reason == nil
+                    or (typeof(reason) == "Instance" and reason:IsA("Humanoid"))
+                then
+                    originalStop(reason)
+                end
+                -- BasePart = wall collision → swallow entirely (no stop, no bonk damage, no Slowness)
+            end)
+            return
+        end
+    end
+end
+
+-- =====================
+-- Auto-Trick fire
+-- =====================
+local function fireTrick()
+    if not autoTrick     then return end
+    if trickDebounce     then return end
+    if not trickCallback then return end
+    trickDebounce = true
+    trickCallback("TrickInput", Enum.UserInputState.Begin)
+    task.delay(0.08, function()
+        if trickCallback then
+            trickCallback("TrickInput", Enum.UserInputState.End)
+        end
+        task.delay(1.1, function()
+            trickDebounce = false
+        end)
+    end)
+end
+
+-- =====================
+-- OPTIMIZED Highlight watcher
+-- Caches the Highlight via events instead of scanning game:GetDescendants() every frame.
+-- =====================
+local function isTrickReadyColor(color)
+    return color.R > 0.85 and color.G < 0.45 and color.B > 0.85
+end
+
+local highlightAddedConn
+local highlightRemovedConn
+
+local function onDescendantAdded(inst)
+    if not inst:IsA("Highlight") then return end
+    local char = lp.Character
+    if char and inst.Adornee == char and isTrickReadyColor(inst.FillColor) then
+        trackedHighlight = inst
+    end
+end
+
+local function onDescendantRemoving(inst)
+    if inst == trackedHighlight then
+        trackedHighlight = nil
+    end
+end
+
+highlightAddedConn   = game.DescendantAdded:Connect(onDescendantAdded)
+highlightRemovedConn = game.DescendantRemoving:Connect(onDescendantRemoving)
+
+-- RenderStepped cost is now O(1): one nil-check then one color check.
+local trickHighlightConnection = RunService.RenderStepped:Connect(function()
+    if not autoTrick        then return end
+    if not trackedHighlight then return end
+    local char = lp.Character
+    if char
+        and trackedHighlight.Adornee == char
+        and isTrickReadyColor(trackedHighlight.FillColor)
+    then
+        fireTrick()
+    end
+end)
+
+-- =====================
+-- Charge detect loop
+-- =====================
+local chargeLoopConnection = RunService.RenderStepped:Connect(function()
+    if not controlChargeEnabled then
+        if controlChargeActive then stopOverride() end
+        return
+    end
+    local hum = getHumanoid()
+    if not hum then
+        if controlChargeActive then stopOverride() end
+        return
+    end
+    if detectChargeAnimation() then
+        if not controlChargeActive then startOverride() end
+    else
+        if controlChargeActive then stopOverride() end
+    end
+end)
+
+-- =====================
+-- Fast Spray oscillation
+-- Runs every frame; cost is trivial when not spraying (two flag checks, return).
+-- When active: moves HRP ±3 studs along the axis away from the wall (LookVector faces
+-- the wall, so we oscillate on that axis). The base CFrame is re-anchored each cycle
+-- near the zero crossing to prevent drift.
+-- =====================
+local fastSprayConn = RunService.RenderStepped:Connect(function(dt)
+    if not fastSpray then
+        fastSprayPhase  = 0
+        fastSprayBaseCF = nil
+        return
+    end
+    if not isCurrentlySprayPainting() then
+        fastSprayPhase  = 0
+        fastSprayBaseCF = nil
+        return
+    end
+    local char = lp.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    -- Re-anchor near the sine zero-crossing so the base doesn't drift over time
+    if not fastSprayBaseCF or math.abs(math.sin(fastSprayPhase)) < 0.05 then
+        fastSprayBaseCF = hrp.CFrame
+    end
+
+    fastSprayPhase = fastSprayPhase + dt * (math.pi * 4.5)    -- ~1.5 full cycles/sec
+    local offset   = math.sin(fastSprayPhase) * 2           -- ±3 studs  (6 studs total range)
+
+    -- LookVector faces the wall; oscillate along that axis back and forth
+    hrp.CFrame = fastSprayBaseCF + (fastSprayBaseCF.LookVector * (-offset))
+end)
+
+-- =====================
+-- Character respawn cleanup
+-- =====================
+lp.CharacterAdded:Connect(function()
+    if shiftlockConnection then
+        shiftlockConnection:Disconnect()
+        shiftlockConnection = nil
+    end
+    trackedHighlight = nil   -- stale cache from previous life
+    fastSprayPhase   = 0
+    fastSprayBaseCF  = nil
+    trickDebounce    = false
+    trickCallback    = nil
+end)
+
+-- =====================
+-- Central __namecall hook
+-- =====================
+local _hook
+_hook = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+
+    -- ----- BindToRenderStep: intercept the Sk8 callback -----
+    if self == RunService and method == "BindToRenderStep" then
+        local name, prio, cb = ...
+        if name == "Sk8" and type(cb) == "function" then
+
+            -- Layer 1: patch u187 (the stop function) to block wall stops
+            patchSk8Callback(cb)
+
+            -- Layer 2: wrap the entire RenderStep callback so we can apply velocity
+            -- reflection AFTER it runs, pushing Vee out of walls she's wedged against.
+            local wrappedCb = function(dt)
+                cb(dt)   -- run the (already-patched) original Sk8 loop
+
+                -- Only active when noWallStop is on and skating is confirmed
+                -- (trickCallback is bound by CAS.BindAction exactly during Sk8).
+                if noWallStop and trickCallback then
+                    local char = lp.Character
+                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local vel  = hrp.AssemblyLinearVelocity
+                        local hVel = Vector3.new(vel.X, 0, vel.Z)
+
+                        -- If horizontal speed collapsed to near-zero, Vee is stuck on a wall
+                        if hVel.Magnitude < 5 then
+                            local fwd = hrp.CFrame.LookVector
+                            local rc  = workspace:Raycast(hrp.Position, fwd * 6, wallRayParams)
+                            if rc then
+                                -- Project wall normal onto the horizontal plane and reflect
+                                local n = Vector3.new(rc.Normal.X, 0, rc.Normal.Z)
+                                if n.Magnitude > 0.01 then
+                                    n = n.Unit
+                                    local reflected = (fwd - 2 * fwd:Dot(n) * n)
+                                    if reflected.Magnitude > 0.01 then
+                                        hrp.AssemblyLinearVelocity = Vector3.new(
+                                            reflected.Unit.X * 28,
+                                            vel.Y,
+                                            reflected.Unit.Z * 28
+                                        )
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Register the wrapped version instead of the raw callback
+            return _hook(self, name, prio, wrappedCb)
+        end
+    end
+
+    -- ----- ContextActionService: track TrickInput binding -----
+    if self == ContextActionService and method == "BindAction" then
+        local actionName, cb = ...
+        if actionName == "TrickInput" and type(cb) == "function" then
+            trickCallback = cb
+        end
+    end
+
+    if self == ContextActionService and method == "UnbindAction" then
+        local actionName = ...
+        if actionName == "TrickInput" then
+            trickCallback = nil
+            trickDebounce = false
+        end
+    end
+
+    return _hook(self, ...)
+end)
+
+-- =====================
+-- WindUI
+-- =====================
+local Window = WindUI:CreateWindow({
+    Title  = "Veeronica Tweaks",
+    Icon   = "zap",
+    Author = "",
+    Folder = "VeeronicaTweaks",
+    Size   = UDim2.fromOffset(480, 480),
+    Theme  = "Dark",
+})
+
+-- Tab: Charge
+local ChargeTab = Window:Tab({ Title = "Charge", Icon = "zap" })
+
+ChargeTab:Toggle({
+    Title    = "Charge Override",
+    Desc     = "Automatically controls dash direction and speed when the charge animation plays.",
+    Icon     = "zap",
+    Value    = false,
+    Callback = function(state)
+        controlChargeEnabled = state
+        if not state and controlChargeActive then stopOverride() end
+        WindUI:Notify({ Title = "Charge Override", Content = state and "Enabled" or "Disabled", Duration = 3 })
+    end,
+})
+
+-- Tab: Sk8
+local Sk8Tab = Window:Tab({ Title = "Sk8", Icon = "arrow-right" })
+
+Sk8Tab:Toggle({
+    Title    = "No Wall Stop",
+    Desc     = "Wall hits are completely ignored — no skating stop, no self-damage, no Slowness IV. Only manual recast, stamina depletion, or a Killer ends the run. Vee reflects off walls automatically.",
+    Icon     = "shield",
+    Value    = false,
+    Callback = function(state)
+        noWallStop = state
+        WindUI:Notify({ Title = "No Wall Stop", Content = state and "Enabled" or "Disabled", Duration = 3 })
+    end,
+})
+
+Sk8Tab:Toggle({
+    Title    = "Auto Trick",
+    Desc     = "Automatically performs a trick the moment the purple trick-ready glow appears on Veeronica.",
+    Icon     = "sparkles",
+    Value    = false,
+    Callback = function(state)
+        autoTrick = state
+        if not state then
+            trickDebounce    = false
+            trackedHighlight = nil
+        end
+        WindUI:Notify({ Title = "Auto Trick", Content = state and "Enabled" or "Disabled", Duration = 3 })
+    end,
+})
+
+-- Tab: Spray
+local SprayTab = Window:Tab({ Title = "Spray", Icon = "paint-bucket" })
+
+SprayTab:Toggle({
+    Title    = "Fast Spray",
+    Desc     = "While spraying, rapidly oscillates Veeronica ±3 studs (6 total) perpendicular to the wall to cover area faster.",
+    Icon     = "zap",
+    Value    = false,
+    Callback = function(state)
+        fastSpray = state
+        if not state then
+            fastSprayPhase  = 0
+            fastSprayBaseCF = nil
+        end
+        WindUI:Notify({ Title = "Fast Spray", Content = state and "Enabled" or "Disabled", Duration = 3 })
+    end,
+})
+
+-- Tab: Settings
+local SettingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
+
+SettingsTab:Button({
+    Title    = "Unload Script",
+    Desc     = "Stops all features, restores original behavior, and closes the UI.",
+    Icon     = "power",
+    Callback = function()
+        controlChargeEnabled = false
+        autoTrick            = false
+        noWallStop           = false
+        fastSpray            = false
+        trickDebounce        = false
+        trickCallback        = nil
+        trackedHighlight     = nil
+        fastSprayPhase       = 0
+        fastSprayBaseCF      = nil
+
+        if controlChargeActive then stopOverride() end
+
+        for _, conn in ipairs({
+            chargeLoopConnection,
+            trickHighlightConnection,
+            highlightAddedConn,
+            highlightRemovedConn,
+            fastSprayConn,
+        }) do
+            if conn then pcall(function() conn:Disconnect() end) end
+        end
+        chargeLoopConnection    = nil
+        trickHighlightConnection = nil
+        highlightAddedConn      = nil
+        highlightRemovedConn    = nil
+        fastSprayConn           = nil
+
+        setShiftlock(false)
+        pcall(function() hookmetamethod(game, "__namecall", _hook) end)
+        Window:Destroy()
+    end,
+})
