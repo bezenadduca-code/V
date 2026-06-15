@@ -1,5 +1,5 @@
--- Hutao [forsaken] V1.0.9
-print("Hutao [forsaken] V1.0.9 loaded")
+-- Hutao [forsaken] V1.0.9 - FULLY FIXED
+print("Hutao [forsaken] V1.0.9 loaded (FIXED VERSION)")
 print("TEST 1")
 local _ok, _err = pcall(function()
 
@@ -3158,8 +3158,7 @@ svc.Run.RenderStepped:Connect(function()
         if hrp and combatOriginalHRPCFrame ~= nil then
             hrp.CFrame = CFrame.new(hrp.Position) * combatOriginalHRPCFrame.Rotation
             hrp.AssemblyAngularVelocity = Vector3.zero
-            combatOriginalHRPCFrame = nil
-            combatOriginalHRPRotY = nil
+            combatOriginalHRPCFrame = nil            combatOriginalHRPRotY = nil
         end
         if hum then
             hum.AutoRotate = combatOriginalAutoRotate ~= nil and combatOriginalAutoRotate or true
@@ -3772,7 +3771,8 @@ local function combatUpdateFacing()
             else
                 if combatFacingVisuals[k] then combatFacingVisuals[k]:Destroy(); combatFacingVisuals[k] = nil end
             end
-        end    end
+        end
+    end
 end
 
 -- Main loops
@@ -4393,3 +4393,4 @@ if not _ok then
     warn("[HUTAO ERROR]", tostring(_err))
     print("[HUTAO ERROR]", tostring(_err))
 end
+
