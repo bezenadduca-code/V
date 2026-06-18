@@ -1156,32 +1156,239 @@ secKillerAbilities:Toggle({ Title="Noli — Void Rush Control", Type="Checkbox",
 local tabVisual = win:Tab({ Title = "Visual", Icon = "eye", IconColor = Color3.fromHex("#7DD3FC"), ShowTabTitle = false })
 local secESP    = tabVisual:Section({ Title = "ESP", Opened = true })
 
--- ============================================================================
--- ESP CONFIG
--- ============================================================================
-
-local ESP_CONFIG = {
-    Killers     = false,
-    Survivors   = false,
-    Generators  = false,
-    Items       = false,
-    Buildings   = false,
-    
-    -- Colors (Rayfield style)
-    KillerColor    = Color3.fromRGB(100, 0, 0),      -- Dark Red
-    SurvivorColor  = Color3.fromRGB(255, 215, 0),    -- Gold
-    GeneratorColor = Color3.fromRGB(255, 200, 50),   -- Yellow
-    ItemColor      = Color3.fromRGB(0, 200, 255),    -- Cyan
-    BuildingColor  = Color3.fromRGB(128, 0, 255),    -- Purple
-    
-    MaxDistance    = 2000,
+local esp = {
+    killers    = false,
+    survivors  = false,
+    generators = false,
+    items      = false,
+    buildings  = false,
+    killerFolder=nil, survivorFolder=nil, mapFolder=nil,
+    playerConns={}, mapConns={}, healthConns={}, progConns={}, guardConns={}, ready=false,
 }
 
--- State Storage
-local EngineState = {
-    Pool = {},
-    Connections = {},
-}
+local function espItemColor(name)
+    local n = name:lower()
+    if n:find("medkit")    then return Color3.fromRGB(0, 255, 255) end
+    if n:find("bloxycola") then return Color3.fromRGB(0, 255, 255) end
+    return Color3.fromRGB(0, 255, 255)
+end
+
+local function espItemHeld(obj)
+    for _, plr in ipairs(svc.Players:GetPlayers()) do
+        local ch = plr.Character
+        if ch and obj:IsDescendantOf(ch) then return true end
+        local bp = plr:FindFirstChildOfClass("Backpack")
+        if bp and obj:IsDescendantOf(bp) then return true end
+    end
+    return false
+end
+
+local function espGetHealthColor(percent)
+    if percent >= 70 then return Color3.fromRGB(0, 255, 0) end
+    if percent >= 40 then return Color3.fromRGB(255, 255, 0) end
+    if percent >= 15 then return Color3.fromRGB(255, 165, 0) end
+    return Color3.fromRGB(255, 0, 0)
+end
+
+local espAttach
+local espDetach
+
+espAttach = function(obj, tag, color, isChar)
+    if not obj or not obj.Parent then return end
+    if obj:FindFirstChild(tag) and obj:FindFirstChild(tag.."_bb") then return end
+    if esp.guardConns[obj]  then pcall(function() esp.guardConns[obj]:Disconnect()  end); esp.guardConns[obj]  = nil end
+    if esp.healthConns[obj] then pcall(function() esp.healthConns[obj]:Disconnect() end); esp.healthConns[obj] = nil end
+    if esp.progConns[obj]   then pcall(function() esp.progConns[obj]:Disconnect()   end); esp.progConns[obj]   = nil end
+    pcall(function()
+        local h = obj:FindFirstChild(tag);        if h then h:Destroy() end
+        local b = obj:FindFirstChild(tag.."_bb"); if b then b:Destroy() end
+    end)
+    local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") or obj:FindFirstChild("Base") or obj:FindFirstChild("Main")
+    if not root then for _,d in ipairs(obj:GetDescendants()) do if d:IsA("BasePart") then root=d; break end end end
+    if not root and obj:IsA("BasePart") then root = obj end
+    if not root then return end
+    pcall(function()
+        local hl = Instance.new("Highlight"); hl.Name=tag; hl.FillColor=color; hl.FillTransparency=0.8; hl.OutlineColor=color; hl.OutlineTransparency=0; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Adornee=obj; hl.Parent=obj
+        local bb = Instance.new("BillboardGui"); bb.Name=tag.."_bb"; bb.Adornee=root; bb.Size=UDim2.new(0,120,0,24); bb.StudsOffset=Vector3.new(0,isChar and 3.5 or 3.8,0); bb.AlwaysOnTop=true; bb.MaxDistance=1000; bb.Parent=obj
+        local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1; lbl.TextColor3=color; lbl.TextStrokeTransparency=0.5; lbl.TextStrokeColor3=Color3.new(0,0,0); lbl.TextSize=14; lbl.FontFace=Font.new("rbxasset://fonts/families/AccanthisADFStd.json"); lbl.Parent=bb
+        
+        if isChar then
+            local hum = obj:FindFirstChildOfClass("Humanoid")
+            if hum then
+                local percent = (hum.Health / hum.MaxHealth) * 100
+                local percentInt = math.floor(percent)
+                lbl.Text = obj.Name .. " (" .. percentInt .. "%)"
+                lbl.TextColor3 = espGetHealthColor(percent)
+                local healthConn = hum.HealthChanged:Connect(function()
+                    if lbl and lbl.Parent then
+                        local newPercent = (hum.Health / hum.MaxHealth) * 100
+                        local newPercentInt = math.floor(newPercent)
+                        lbl.Text = obj.Name .. " (" .. newPercentInt .. "%)"
+                        lbl.TextColor3 = espGetHealthColor(newPercent)
+                    end
+                end)
+                esp.healthConns[obj] = healthConn
+            else
+                lbl.Text = obj.Name
+            end
+        else
+            local prog = obj:FindFirstChild("Progress")
+            if prog and prog:IsA("NumberValue") then
+                lbl.Text = math.floor(prog.Value) .. "%"
+                local progConn = prog.Changed:Connect(function()
+                    if lbl and lbl.Parent then
+                        lbl.Text = math.floor(prog.Value) .. "%"
+                    end
+                end)
+                esp.progConns[obj] = progConn
+            else
+                lbl.Text = obj.Name
+            end
+        end
+    end)
+    if esp.guardConns[obj] then pcall(function() esp.guardConns[obj]:Disconnect() end) end
+    esp.guardConns[obj] = obj.ChildRemoved:Connect(function(removed)
+        if removed.Name~=tag and removed.Name~=(tag.."_bb") then return end
+        task.defer(function()
+            if not obj or not obj.Parent then return end
+            if not isChar and espItemHeld(obj) then return end
+            espAttach(obj,tag,color,isChar)
+        end)
+    end)
+end
+
+espDetach = function(obj, tag)
+    if not obj then return end
+    if esp.guardConns[obj] then pcall(function() esp.guardConns[obj]:Disconnect() end); esp.guardConns[obj]=nil end
+    pcall(function()
+        for _,name in ipairs({tag, tag.."_bb"}) do local c=obj:FindFirstChild(name); if c then c:Destroy() end end
+        if esp.healthConns[obj] then esp.healthConns[obj]:Disconnect(); esp.healthConns[obj]=nil end
+        if esp.progConns[obj]   then esp.progConns[obj]:Disconnect();   esp.progConns[obj]=nil   end
+    end)
+end
+
+local function espDoKillers(on)
+    if not esp.killerFolder then return end
+    for _,k in ipairs(esp.killerFolder:GetChildren()) do if k:IsA("Model") then if on then espAttach(k,"esp_k",Color3.fromRGB(255,80,80),true) else espDetach(k,"esp_k") end end end
+end
+local function espDoSurvivors(on)
+    if not esp.survivorFolder then return end
+    for _,s in ipairs(esp.survivorFolder:GetChildren()) do if s:IsA("Model") then if on then espAttach(s,"esp_s",Color3.fromRGB(50,255,50),true) else espDetach(s,"esp_s") end end end
+end
+local function espDoGenerators(on)
+    local map=getMapContent(); if not map then return end
+    for _,obj in ipairs(map:GetChildren()) do if obj.Name=="Generator" then if on then espAttach(obj,"esp_g",Color3.fromRGB(255,105,180),false) else espDetach(obj,"esp_g") end end end
+end
+local function espDoItems(on)
+    for _,obj in ipairs(svc.WS:GetDescendants()) do
+        if obj.Name=="BloxyCola" or obj.Name=="Medkit" then
+            if not espItemHeld(obj) then
+                if on then espAttach(obj,"esp_i",espItemColor(obj.Name),false) else espDetach(obj,"esp_i") end
+            end
+        end
+    end
+end
+local function espDoBuildings(on)
+    local ig=getIngame(); if not ig then return end
+    for _,obj in ipairs(ig:GetChildren()) do if obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" or obj.Name=="BuildermanDispenser" then if on then espAttach(obj,"esp_b",Color3.fromRGB(255,80,0),false) else espDetach(obj,"esp_b") end end end
+end
+
+local function espBindPlayers()
+    for _,c in pairs(esp.playerConns) do if c.Connected then c:Disconnect() end end; esp.playerConns={}
+    if esp.killerFolder then
+        table.insert(esp.playerConns, esp.killerFolder.ChildAdded:Connect(function(ch) task.wait(0.2); if esp.killers and ch and ch.Parent and ch:IsA("Model") then espAttach(ch,"esp_k",Color3.fromRGB(255,80,80),true) end end))
+        table.insert(esp.playerConns, esp.killerFolder.ChildRemoved:Connect(function(ch) espDetach(ch,"esp_k") end))
+    end
+    if esp.survivorFolder then
+        table.insert(esp.playerConns, esp.survivorFolder.ChildAdded:Connect(function(ch) task.wait(0.2); if esp.survivors and ch and ch.Parent and ch:IsA("Model") then espAttach(ch,"esp_s",Color3.fromRGB(50,255,50),true) end end))
+        table.insert(esp.playerConns, esp.survivorFolder.ChildRemoved:Connect(function(ch) espDetach(ch,"esp_s") end))
+    end
+end
+local function espBindWorld()
+    for _,c in pairs(esp.mapConns) do if c.Connected then c:Disconnect() end end; esp.mapConns={}
+    local ig=getIngame(); if not ig then return end
+    table.insert(esp.mapConns, ig.ChildAdded:Connect(function(obj)
+        task.wait(0.2)
+        if esp.buildings and (obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" or obj.Name=="BuildermanDispenser") then espAttach(obj,"esp_b",Color3.fromRGB(255,80,0),false) end
+        if obj.Name=="Map" then
+            task.wait(1); esp.mapFolder=obj
+            obj.ChildAdded:Connect(function(child) task.wait(0.2); if esp.generators and child.Name=="Generator" then espAttach(child,"esp_g",Color3.fromRGB(255,105,180),false) end end)
+            obj.ChildRemoved:Connect(function(child) if child.Name=="Generator" then espDetach(child,"esp_g") end end)
+            if esp.generators then task.spawn(function() espDoGenerators(true) end) end
+            if esp.items      then task.spawn(function() espDoItems(true) end)      end
+        end
+    end))
+    table.insert(esp.mapConns, ig.ChildRemoved:Connect(function(obj)
+        if obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" then espDetach(obj,"esp_b") end
+        if obj.Name=="Map" then esp.mapFolder=nil end
+    end))
+    table.insert(esp.mapConns, svc.WS.DescendantAdded:Connect(function(obj)
+        if not esp.items then return end
+        if obj.Name ~= "BloxyCola" and obj.Name ~= "Medkit" then return end
+        task.wait(0.2); if obj and obj.Parent and not espItemHeld(obj) then espAttach(obj,"esp_i",espItemColor(obj.Name),false) end
+    end))
+    local existing=getMapContent(); if existing then esp.mapFolder=existing; task.spawn(function() task.wait(2); if esp.generators then espDoGenerators(true) end; if esp.items then espDoItems(true) end end) end
+end
+
+secESP:Toggle({ Title="Killers",    Type="Checkbox", Flag="espKillers",    Default=esp.killers,    Callback=function(on) esp.killers=on;    task.spawn(function() espDoKillers(on)    end) end })
+secESP:Toggle({ Title="Survivors",  Type="Checkbox", Flag="espSurvivors",  Default=esp.survivors,  Callback=function(on) esp.survivors=on;  task.spawn(function() espDoSurvivors(on)  end) end })
+secESP:Toggle({ Title="Generators", Type="Checkbox", Flag="espGenerators", Default=esp.generators, Callback=function(on) esp.generators=on; task.spawn(function() espDoGenerators(on) end) end })
+secESP:Toggle({ Title="Items",      Type="Checkbox", Flag="espItems",      Default=esp.items,      Callback=function(on) esp.items=on;      task.spawn(function() espDoItems(on)      end) end })
+secESP:Toggle({ Title="Buildings",  Type="Checkbox", Flag="espBuildings",  Default=esp.buildings,  Callback=function(on) esp.buildings=on;  task.spawn(function() espDoBuildings(on)  end) end })
+
+local secColors = tabVisual:Section({ Title = "ESP Colors", Opened = false })
+
+secColors:Colorpicker({ Title="Killer Color",    Default=Color3.fromRGB(255,80,80),   Transparency=0, Callback=function(c)
+    if not esp.killers then return end
+    espDoKillers(false)
+    task.wait(0.05)
+    if esp.killerFolder then
+        for _,k in ipairs(esp.killerFolder:GetChildren()) do if k:IsA("Model") then espAttach(k,"esp_k",c,true) end end
+    end
+end })
+
+secColors:Colorpicker({ Title="Survivor Color",  Default=Color3.fromRGB(50,255,50),   Transparency=0, Callback=function(c)
+    if not esp.survivors then return end
+    espDoSurvivors(false)
+    task.wait(0.05)
+    if esp.survivorFolder then
+        for _,s in ipairs(esp.survivorFolder:GetChildren()) do if s:IsA("Model") then espAttach(s,"esp_s",c,true) end end
+    end
+end })
+
+secColors:Colorpicker({ Title="Generator Color", Default=Color3.fromRGB(255,105,180), Transparency=0, Callback=function(c)
+    if not esp.generators then return end
+    espDoGenerators(false)
+    task.wait(0.05)
+    local map=getMapContent(); if map then
+        for _,obj in ipairs(map:GetChildren()) do if obj.Name=="Generator" then espAttach(obj,"esp_g",c,false) end end
+    end
+end })
+
+secColors:Colorpicker({ Title="Item Color",      Default=Color3.fromRGB(0,255,255),   Transparency=0, Callback=function(c)
+    if not esp.items then return end
+    espDoItems(false)
+    task.wait(0.05)
+    for _,obj in ipairs(svc.WS:GetDescendants()) do
+        if (obj.Name=="BloxyCola" or obj.Name=="Medkit") and not espItemHeld(obj) then espAttach(obj,"esp_i",c,false) end
+    end
+end })
+
+secColors:Colorpicker({ Title="Building Color",  Default=Color3.fromRGB(255,80,0),    Transparency=0, Callback=function(c)
+    if not esp.buildings then return end
+    espDoBuildings(false)
+    task.wait(0.05)
+    local ig=getIngame(); if ig then
+        for _,obj in ipairs(ig:GetChildren()) do
+            if obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" or obj.Name=="BuildermanDispenser" then espAttach(obj,"esp_b",c,false) end
+        end
+    end
+end })
+
+task.spawn(espBindPlayers)
+task.spawn(espBindWorld)
+
+------------------------------------------------------------------------
 
 -- ============================================================================
 -- COLOR HELPERS
@@ -1194,459 +1401,6 @@ local function GetHealthColor(pct)
     return Color3.fromRGB(255, 0, 0)                            -- Red
 end
 
-local function GetItemColor(name)
-    local lowered = name:lower()
-    if lowered:find("medkit") then
-        return Color3.fromRGB(0, 200, 255)    -- Cyan
-    elseif lowered:find("bloxycola") then
-        return Color3.fromRGB(255, 150, 0)    -- Orange
-    end
-    return Color3.fromRGB(0, 200, 255)
-end
-
--- ============================================================================
--- TEAM FOLDER RESOLVERS
--- ============================================================================
-
-local function GetTeamFolderESP(name)
-    local pNode = svc.WS:FindFirstChild("Players")
-    return pNode and pNode:FindFirstChild(name)
-end
-
-local function GetMapContentESP()
-    local iGame = svc.WS:FindFirstChild("Map") and svc.WS.Map:FindFirstChild("Ingame")
-    return iGame and iGame:FindFirstChild("Map")
-end
-
--- ============================================================================
--- GENERATOR TRACKING
--- ============================================================================
-
-local GeneratorProgress = {}
-local TotalGenerators = 0
-
-local function UpdateGeneratorCount()
-    local mc = GetMapContentESP()
-    if not mc then return end
-    
-    TotalGenerators = 0
-    GeneratorProgress = {}
-    
-    for _, obj in ipairs(mc:GetChildren()) do
-        if obj.Name == "Generator" then
-            TotalGenerators = TotalGenerators + 1
-            local progress = obj:FindFirstChild("Progress")
-            if progress and progress:IsA("NumberValue") then
-                GeneratorProgress[obj] = progress.Value
-            else
-                GeneratorProgress[obj] = 0
-            end
-        end
-    end
-end
-
-local function GetGeneratorText(obj)
-    local progress = GeneratorProgress[obj] or 0
-    local completed = math.floor(progress / 25)
-    return string.format("%s [%d/4]", obj.Name, completed)
-end
-
--- ============================================================================
--- CLEANUP FUNCTIONS
--- ============================================================================
-
-local function RemoveESP(object)
-    if not object then return end
-    
-    if EngineState.Connections[object] then
-        for _, cx in ipairs(EngineState.Connections[object]) do
-            if cx then cx:Disconnect() end
-        end
-        EngineState.Connections[object] = nil
-    end
-
-    local cache = EngineState.Pool[object]
-    if cache then
-        pcall(function()
-            if cache.Highlight then cache.Highlight:Destroy() end
-            if cache.Billboard then cache.Billboard:Destroy() end
-        end)
-        EngineState.Pool[object] = nil
-    end
-end
-
--- ============================================================================
--- CORE ALLOCATION ENGINE - FIXED: Only attaches to main model, not body parts
--- ============================================================================
-
-local function AddESP(object, tag, defaultColor, isCharacter)
-    if not object or not object.Parent then return end
-    if EngineState.Pool[object] then return end
-
-    -- Characters must be Models; items/buildings can also be BaseParts
-    if isCharacter then
-        if not object:IsA("Model") then return end
-    else
-        if not (object:IsA("Model") or object:IsA("BasePart")) then return end
-    end
-
-    -- Skip if it's the local player's character
-    if object == lp.Character then return end
-
-    -- Find root part - for characters, ONLY use HumanoidRootPart to avoid billboard
-    -- adorning a random body part (Torso, Left Arm, etc.) before HRP is replicated
-    local root
-    if isCharacter then
-        -- Wait up to 3s for HumanoidRootPart to replicate
-        local deadline = tick() + 3
-        repeat
-            root = object:FindFirstChild("HumanoidRootPart")
-            if not root then task.wait(0.1) end
-        until root or tick() > deadline or not object.Parent
-        if not root then return end -- character never fully loaded, skip
-    else
-        root = object.PrimaryPart
-            or object:FindFirstChildWhichIsA("BasePart")
-            or object
-    end
-
-    -- Re-check pool after the yield (another call may have beaten us)
-    if EngineState.Pool[object] then return end
-    if not object or not object.Parent then return end
-
-    EngineState.Connections[object] = {}
-
-    -- Billboard
-    local bGui = Instance.new("BillboardGui")
-    bGui.Name = "ESP_" .. tag
-    bGui.Adornee = root
-    bGui.Size = UDim2.new(0, 180, 0, 35)
-    bGui.StudsOffset = Vector3.new(0, isCharacter and 3.5 or 2.5, 0)
-    bGui.AlwaysOnTop = true
-    bGui.MaxDistance = ESP_CONFIG.MaxDistance
-    bGui.Parent = object
-
-    local tLabel = Instance.new("TextLabel")
-    tLabel.Size = UDim2.new(1, 0, 1, 0)
-    tLabel.BackgroundTransparency = 1
-    tLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    tLabel.TextStrokeTransparency = 0.3
-    tLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    tLabel.TextSize = 13
-    tLabel.Font = Enum.Font.GothamBold
-    tLabel.Text = object.Name
-    tLabel.Parent = bGui
-
-    local data = {
-        Object = object,
-        RootPart = root,
-        Tag = tag,
-        Billboard = bGui,
-        TextLabel = tLabel,
-        BaseColor = defaultColor,
-        IsCharacter = isCharacter,
-        HPPercent = 100,
-        Highlight = nil
-    }
-    EngineState.Pool[object] = data
-
-    -- Health tracking for characters
-    if isCharacter then
-        local hum = object:FindFirstChildOfClass("Humanoid")
-        if hum then
-            local function UpdateHealth()
-                local mHp = math.max(hum.MaxHealth, 1)
-                local pct = (hum.Health / mHp) * 100
-                data.HPPercent = math.floor(pct + 0.5)
-                
-                -- Format based on type
-                if data.Tag == "Killer" then
-                    data.TextLabel.Text = string.format("[KILLER] %s [%d%%]", object.Name, data.HPPercent)
-                    data.TextLabel.TextColor3 = ESP_CONFIG.KillerColor
-                else
-                    -- Survivors - Gold with health color
-                    local healthColor = GetHealthColor(pct)
-                    data.TextLabel.Text = string.format("%s [%d%%]", object.Name, data.HPPercent)
-                    data.TextLabel.TextColor3 = healthColor
-                    data.BaseColor = ESP_CONFIG.SurvivorColor
-                end
-                
-                if data.Highlight then
-                    if data.Tag == "Killer" then
-                        data.Highlight.FillColor = ESP_CONFIG.KillerColor
-                        data.Highlight.OutlineColor = ESP_CONFIG.KillerColor
-                    else
-                        data.Highlight.FillColor = ESP_CONFIG.SurvivorColor
-                        data.Highlight.OutlineColor = ESP_CONFIG.SurvivorColor
-                    end
-                end
-            end
-            UpdateHealth()
-            table.insert(EngineState.Connections[object], hum.HealthChanged:Connect(UpdateHealth))
-        end
-    else
-        -- Generator tracking
-        if tag == "Generator" then
-            local progress = object:FindFirstChild("Progress")
-            if progress and progress:IsA("NumberValue") then
-                local function UpdateGenerator()
-                    GeneratorProgress[object] = progress.Value
-                    data.TextLabel.Text = GetGeneratorText(object)
-                end
-                UpdateGenerator()
-                table.insert(EngineState.Connections[object], progress.Changed:Connect(UpdateGenerator))
-            else
-                data.TextLabel.Text = GetGeneratorText(object)
-            end
-            data.TextLabel.TextColor3 = ESP_CONFIG.GeneratorColor
-            data.BaseColor = ESP_CONFIG.GeneratorColor
-        else
-            -- Items and Buildings
-            data.TextLabel.Text = object.Name
-            data.TextLabel.TextColor3 = defaultColor
-            data.BaseColor = defaultColor
-        end
-    end
-
-    -- Highlight (glow effect)
-    local hl = Instance.new("Highlight")
-    hl.Name = "ESPGlow_" .. tag
-    hl.FillColor = data.BaseColor
-    hl.FillTransparency = 0.7
-    hl.OutlineColor = data.BaseColor
-    hl.OutlineTransparency = 0.2
-    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Adornee = object
-    hl.Parent = object
-    data.Highlight = hl
-
-    -- Auto cleanup
-    table.insert(EngineState.Connections[object], object.AncestryChanged:Connect(function(_, pNode)
-        if not pNode then RemoveESP(object) end
-    end))
-end
-
--- ============================================================================
--- SCAN FUNCTIONS - FIXED: Only scans Models, ignores body parts
--- ============================================================================
-
-local function ScanAll()
-    -- Cleanup dead objects
-    for obj, _ in pairs(EngineState.Pool) do
-        if not obj or not obj.Parent then RemoveESP(obj) end
-    end
-
-    if ESP_CONFIG.Killers then
-        local f = GetTeamFolderESP("Killers")
-        if f then
-            for _, entity in ipairs(f:GetChildren()) do
-                if entity:IsA("Model") and entity ~= lp.Character then 
-                    AddESP(entity, "Killer", ESP_CONFIG.KillerColor, true) 
-                end
-            end
-        end
-    end
-
-    if ESP_CONFIG.Survivors then
-        local f = GetTeamFolderESP("Survivors")
-        if f then
-            for _, entity in ipairs(f:GetChildren()) do
-                if entity:IsA("Model") and entity ~= lp.Character then 
-                    AddESP(entity, "Survivor", ESP_CONFIG.SurvivorColor, true) 
-                end
-            end
-        end
-    end
-
-    local mc = GetMapContentESP()
-    if not mc then return end
-
-    if ESP_CONFIG.Generators then
-        UpdateGeneratorCount()
-        for _, gen in ipairs(mc:GetChildren()) do
-            if gen.Name == "Generator" then
-                -- Skip if already has a billboard to prevent ScanAll loop duplicating
-                if not gen:FindFirstChild("ESP_Generator") then
-                    AddESP(gen, "Generator", ESP_CONFIG.GeneratorColor, false)
-                end
-            end
-        end
-    end
-
-    if ESP_CONFIG.Items then
-        for _, obj in ipairs(svc.WS:GetDescendants()) do
-            if obj:IsA("BasePart") and (obj.Name == "BloxyCola" or obj.Name == "Medkit") then
-                local held = false
-                for _, player in ipairs(svc.Players:GetPlayers()) do
-                    if player.Character and obj:IsDescendantOf(player.Character) then
-                        held = true
-                        break
-                    end
-                    local bp = player:FindFirstChildOfClass("Backpack")
-                    if bp and obj:IsDescendantOf(bp) then
-                        held = true
-                        break
-                    end
-                end
-                if not held then
-                    local parent = obj.Parent
-                    if parent and parent:IsA("Model") then
-                        AddESP(parent, "Item", GetItemColor(obj.Name), false)
-                    else
-                        AddESP(obj, "Item", GetItemColor(obj.Name), false)
-                    end
-                end
-            end
-        end
-    end
-
-    if ESP_CONFIG.Buildings then
-        local ig = svc.WS:FindFirstChild("Map") and svc.WS.Map:FindFirstChild("Ingame")
-        if ig then
-            local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
-            for _, obj in ipairs(ig:GetChildren()) do
-                for _, name in ipairs(buildingNames) do
-                    if obj.Name == name then
-                        AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
-                        break
-                    end
-                end
-            end
-        end
-    end
-end
-
--- ============================================================================
--- BACKGROUND SCAN THREAD
--- ============================================================================
-
-task.spawn(function()
-    while true do
-        pcall(ScanAll)
-        task.wait(2)
-    end
-end)
-
--- ============================================================================
--- WATCH FOR NEW OBJECTS - FIXED: Only watches Models
--- ============================================================================
-
--- Debounce table: prevents multiple simultaneous AddESP calls for the same model
--- when its body parts replicate one-by-one (each fires DescendantAdded)
-local _espWatchDebounce = {}
-
-svc.WS.DescendantAdded:Connect(function(obj)
-    -- Only process models directly; body parts (BasePart, etc.) are ignored here
-    if not obj:IsA("Model") then return end
-
-    -- Debounce per-object so concurrent fires don't race into AddESP together
-    if _espWatchDebounce[obj] then return end
-    _espWatchDebounce[obj] = true
-
-    task.spawn(function()
-        task.wait(0.5) -- let the model finish replicating before we inspect it
-        _espWatchDebounce[obj] = nil
-
-        if not obj or not obj.Parent then return end
-
-        if ESP_CONFIG.Killers then
-            local f = GetTeamFolderESP("Killers")
-            if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
-                AddESP(obj, "Killer", ESP_CONFIG.KillerColor, true)
-            end
-        end
-
-        if ESP_CONFIG.Survivors then
-            local f = GetTeamFolderESP("Survivors")
-            if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
-                AddESP(obj, "Survivor", ESP_CONFIG.SurvivorColor, true)
-            end
-        end
-
-        if ESP_CONFIG.Generators and obj.Name == "Generator" then
-            if not obj:FindFirstChild("ESP_Generator") then
-                AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
-            end
-        end
-
-        if ESP_CONFIG.Buildings then
-            local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
-            for _, name in ipairs(buildingNames) do
-                if obj.Name == name then
-                    AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
-                    break
-                end
-            end
-        end
-    end)
-end)
-
--- Also watch for new parts inside models for items
-svc.WS.DescendantAdded:Connect(function(obj)
-    if not obj:IsA("BasePart") then return end
-    if not ESP_CONFIG.Items then return end
-    if obj.Name ~= "BloxyCola" and obj.Name ~= "Medkit" then return end
-    
-    task.wait(0.5)
-    local held = false
-    for _, player in ipairs(svc.Players:GetPlayers()) do
-        if player.Character and obj:IsDescendantOf(player.Character) then
-            held = true
-            break
-        end
-        local bp = player:FindFirstChildOfClass("Backpack")
-        if bp and obj:IsDescendantOf(bp) then
-            held = true
-            break
-        end
-    end
-    if not held then
-        local parent = obj.Parent
-        if parent and parent:IsA("Model") then
-            AddESP(parent, "Item", GetItemColor(obj.Name), false)
-        else
-            AddESP(obj, "Item", GetItemColor(obj.Name), false)
-        end
-    end
-end)
-
--- ============================================================================
--- UI TOGGLES (WindUI)
--- ============================================================================
-
-secESP:Toggle({ Title="Killers", Type="Checkbox", Flag="espKillers", Default=ESP_CONFIG.Killers,
-    Callback=function(on) ESP_CONFIG.Killers=on; if on then pcall(ScanAll) end end })
-
-secESP:Toggle({ Title="Survivors", Type="Checkbox", Flag="espSurvivors", Default=ESP_CONFIG.Survivors,
-    Callback=function(on) ESP_CONFIG.Survivors=on; if on then pcall(ScanAll) end end })
-
-secESP:Toggle({ Title="Generators", Type="Checkbox", Flag="espGenerators", Default=ESP_CONFIG.Generators,
-    Callback=function(on) ESP_CONFIG.Generators=on; if on then pcall(ScanAll) end end })
-
-secESP:Toggle({ Title="Items", Type="Checkbox", Flag="espItems", Default=ESP_CONFIG.Items,
-    Callback=function(on) ESP_CONFIG.Items=on; if on then pcall(ScanAll) end end })
-
-secESP:Toggle({ Title="Buildings", Type="Checkbox", Flag="espBuildings", Default=ESP_CONFIG.Buildings,
-    Callback=function(on) ESP_CONFIG.Buildings=on; if on then pcall(ScanAll) end end })
-
-secESP:Button({ Title="Refresh ESP", Callback=function() pcall(ScanAll) end })
-
-local secColors = tabVisual:Section({ Title = "ESP Colors", Opened = false })
-
-secColors:Colorpicker({ Title="Killer Color", Default=ESP_CONFIG.KillerColor, Transparency=0,
-    Callback=function(c) ESP_CONFIG.KillerColor=c end })
-
-secColors:Colorpicker({ Title="Survivor Color", Default=ESP_CONFIG.SurvivorColor, Transparency=0,
-    Callback=function(c) ESP_CONFIG.SurvivorColor=c end })
-
-secColors:Colorpicker({ Title="Generator Color", Default=ESP_CONFIG.GeneratorColor, Transparency=0,
-    Callback=function(c) ESP_CONFIG.GeneratorColor=c end })
-
-secColors:Colorpicker({ Title="Item Color", Default=ESP_CONFIG.ItemColor, Transparency=0,
-    Callback=function(c) ESP_CONFIG.ItemColor=c end })
-
-secColors:Colorpicker({ Title="Building Color", Default=ESP_CONFIG.BuildingColor, Transparency=0,
-    Callback=function(c) ESP_CONFIG.BuildingColor=c end })
 
 ------------------------------------------------------------------------
 -- Minion + Puddle ESP (Kept from original)
@@ -4654,14 +4408,16 @@ task.spawn(function()
             flow.on = win.Flags.flowOn or false
 
             -- ESP
-            ESP_CONFIG.Killers = win.Flags.espKillers or false
-            ESP_CONFIG.Survivors = win.Flags.espSurvivors or false
-            ESP_CONFIG.Generators = win.Flags.espGenerators or false
-            ESP_CONFIG.Items = win.Flags.espItems or false
-            ESP_CONFIG.Buildings = win.Flags.espBuildings or false
-            if ESP_CONFIG.Killers or ESP_CONFIG.Survivors or ESP_CONFIG.Generators or ESP_CONFIG.Items or ESP_CONFIG.Buildings then
-                pcall(ScanAll)
-            end
+            esp.killers    = win.Flags.espKillers    or false
+            esp.survivors  = win.Flags.espSurvivors  or false
+            esp.generators = win.Flags.espGenerators or false
+            esp.items      = win.Flags.espItems      or false
+            esp.buildings  = win.Flags.espBuildings  or false
+            if esp.killers    then task.spawn(function() espDoKillers(true)    end) end
+            if esp.survivors  then task.spawn(function() espDoSurvivors(true)  end) end
+            if esp.generators then task.spawn(function() espDoGenerators(true) end) end
+            if esp.items      then task.spawn(function() espDoItems(true)      end) end
+            if esp.buildings  then task.spawn(function() espDoBuildings(true)  end) end
 
             -- Minion ESP
             mset.pizza  = win.Flags.espPizza  or false
